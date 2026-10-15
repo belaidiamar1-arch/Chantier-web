@@ -340,11 +340,39 @@ const KINDS = ["projects", "milestones", "tasks", "ideas"];
 const CFG_KEY = "chantier.github";
 const cfg = { owner: "belaidiamar1-arch", repo: "Chantier-data", path: "data.json", branch: "main", token: "" };
 try { Object.assign(cfg, JSON.parse(localStorage.getItem(CFG_KEY) || "{}")); } catch (e) {}
-const saveCfg = () => { try { localStorage.setItem(CFG_KEY, JSON.stringify(cfg)); } catch (e) {} };
+const CACHE_KEY = "chantier.cache";
+// Le jeton est gardé dans localStorage et en double dans IndexedDB, au cas où iOS vide l'un des deux.
+function idb(mode, fn) {
+  return new Promise((res) => {
+    try {
+      const r = indexedDB.open("chantier", 1);
+      r.onupgradeneeded = () => r.result.createObjectStore("kv");
+      r.onsuccess = () => {
+        try { const tx = r.result.transaction("kv", mode); const q = fn(tx.objectStore("kv")); tx.oncomplete = () => res(q && q.result); tx.onerror = () => res(null); }
+        catch (e) { res(null); }
+      };
+      r.onerror = () => res(null);
+    } catch (e) { res(null); }
+  });
+}
+const saveCfg = () => {
+  try { localStorage.setItem(CFG_KEY, JSON.stringify(cfg)); } catch (e) {}
+  idb("readwrite", (st) => st.put(JSON.stringify(cfg), "cfg"));
+};
+async function restoreCfg() {
+  if (cfg.token) { idb("readwrite", (st) => st.put(JSON.stringify(cfg), "cfg")); return; }
+  const v = await idb("readonly", (st) => st.get("cfg"));
+  if (v) { try { Object.assign(cfg, JSON.parse(v)); localStorage.setItem(CFG_KEY, v); } catch (e) {} }
+}
+function saveCache() { try { localStorage.setItem(CACHE_KEY, JSON.stringify(remote)); } catch (e) {} }
+function loadCache() {
+  try { const c = JSON.parse(localStorage.getItem(CACHE_KEY) || "null"); if (c && c.data) { remote = { sha: c.sha, data: normalize(c.data) }; S.loaded = 4; } } catch (e) {}
+}
+let retryTimer = null, retries = 0;
 let remote = null;          // { sha, data } : dernier état connu sur GitHub
 let ops = [];               // modifications locales pas encore envoyées
 let syncing = false, flushTimer = null;
-const sync = { state: "idle", error: "" };
+const sync = { state: "idle", error: "", auth: false };
 
 function b64decode(s) { const bin = atob(s.replace(/\s/g, "")); return new TextDecoder().decode(Uint8Array.from(bin, (c) => c.charCodeAt(0))); }
 function b64encode(str) {
@@ -410,7 +438,7 @@ async function flush() {
       const next = applyOps(normalize(JSON.parse(b64decode(fresh.content))), batch);
       try {
         const r = await gh("PUT", { message: `Chantier : ${batch.length} modification${batch.length > 1 ? "s" : ""} depuis l'app`, content: b64encode(JSON.stringify(next, null, 2) + "\n"), sha: fresh.sha, branch: cfg.branch });
-        remote = { sha: r.content.sha, data: next };
+        remote = { sha: r.content.sha, data: next }; saveCache();
         break;
       } catch (e) { if ((e.status === 409 || e.status === 422) && attempt < 4) continue; throw e; }
     }
@@ -429,12 +457,14 @@ async function pull(force) {
   if (!force && remote && a && a.closest && a.closest("#app") && /INPUT|TEXTAREA/.test(a.tagName) && a.value) return;
   try {
     const f = await gh("GET");
-    if (remote && f.sha === remote.sha) { if (sync.state === "error") setSync("ok"); return; }
-    remote = { sha: f.sha, data: normalize(JSON.parse(b64decode(f.content))) };
-    S.loaded = 4; setSync("ok"); refreshView();
+    if (remote && f.sha === remote.sha) { sync.auth = false; retries = 0; if (sync.state !== "ok") { setSync("ok"); render(); } return; }
+    remote = { sha: f.sha, data: normalize(JSON.parse(b64decode(f.content))) }; saveCache();
+    S.loaded = 4; sync.auth = false; retries = 0; setSync("ok"); refreshView();
   } catch (e) {
-    setSync("error", errText(e));
-    if (!remote) render();
+    sync.auth = e.status === 401;
+    setSync("error", errText(e) + (sync.auth ? "" : " · nouvel essai…"));
+    if (!sync.auth) { clearTimeout(retryTimer); retryTimer = setTimeout(() => pull(true), Math.min(30000, 3000 * 2 ** retries++)); }
+    render();
   }
 }
 const newId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
@@ -505,7 +535,7 @@ async function write(fn, okMsg) {
 function render() {
   document.querySelectorAll(".tabbar button").forEach((b) => b.classList.toggle("on", b.dataset.tab === ui.tab));
   const app = $("#app");
-  if (!cfg.token || (!remote && sync.state === "error")) { app.innerHTML = viewSetup(); return; }
+  if (!cfg.token || (!remote && sync.auth)) { app.innerHTML = viewSetup(); return; }
   if (ui.tab === "ideas") app.innerHTML = viewIdeas();
   else if (ui.tab === "guide") app.innerHTML = viewGuide();
   else if (ui.projectId && S.projects[ui.projectId]) app.innerHTML = viewProject(S.projects[ui.projectId]);
@@ -522,7 +552,7 @@ function viewProjects() {
   const head = `<div class="brandline">${HAT}Chantier</div>
     <div class="greet"><small>${today}</small><h1>${greeting()} !</h1><p>${line}</p></div>
     <button class="fab" data-act="new-project" aria-label="Nouveau projet">+</button>`;
-  if (!ps.length) return head + (S.loaded < 4 ? `<div class="empty"><b>Chargement…</b></div>` :
+  if (!ps.length) return head + (S.loaded < 4 ? (sync.state === "error" ? `<div class="empty"><b>Pas de connexion pour l'instant</b>${esc(sync.error)}. L'app réessaie toute seule.</div>` : `<div class="empty"><b>Chargement…</b></div>`) :
     `<div class="empty"><b>Aucun projet pour l'instant</b>Touche le bouton + pour ajouter ton premier projet, puis colle le lien de son dépôt GitHub.</div>`);
   const summary = `<div class="summary">
     <div><b>${ps.length}</b><span>projets</span></div>
@@ -655,7 +685,7 @@ Statuts possibles : todo, doing, done, blocked.`;
 }
 
 function viewSetup() {
-  const failed = cfg.token && sync.state === "error";
+  const failed = cfg.token && sync.auth;
   return `<div class="hero">${HAT}<h1>Chantier</h1><p>Tes projets d'applications, simplement.</p></div>
   <form class="card setup" data-act="setup">
     <h3>Connecte ton dépôt de données</h3>
@@ -845,7 +875,7 @@ document.addEventListener("click", async (e) => {
   if (act === "sync-now") { if (ops.length) flush(); else { await pull(true); render(); } toast("Synchronisé"); return; }
   if (act === "disconnect") {
     if (!el.classList.contains("armed")) { el.classList.add("armed"); el.textContent = "Confirmer la déconnexion"; return; }
-    cfg.token = ""; saveCfg(); remote = null; ops = []; KINDS.forEach((k) => { S[k] = {}; }); setSync("idle"); ui.tab = "projects"; render(); return;
+    cfg.token = ""; saveCfg(); remote = null; ops = []; try { localStorage.removeItem(CACHE_KEY); } catch (e) {} KINDS.forEach((k) => { S[k] = {}; }); setSync("idle"); ui.tab = "projects"; render(); return;
   }
   if (act === "copy") {
     const txt = $("#snippet").textContent;
@@ -867,7 +897,7 @@ document.addEventListener("submit", async (e) => {
   }
   if (f.dataset.act === "setup") {
     cfg.owner = f.owner.value.trim(); cfg.repo = f.repo.value.trim(); cfg.token = f.token.value.trim();
-    saveCfg(); remote = null; setSync("idle");
+    saveCfg(); remote = null; sync.auth = false; setSync("idle");
     const b = f.querySelector("button[type=submit]"); b.disabled = true; b.textContent = "Connexion…";
     await pull(true); render();
     if (remote) toast("Connecté à " + cfg.repo);
@@ -884,7 +914,10 @@ document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeSheet
 
 /* ---------- boot ---------- */
 (async () => {
-  render();
+  await restoreCfg();
+  if (cfg.token) loadCache();
+  refreshView();
+  try { navigator.storage?.persist?.(); } catch (e) {}
   await pull(true);
   setInterval(() => { if (document.visibilityState === "visible") pull(); }, 20000);
   document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") pull(); });
