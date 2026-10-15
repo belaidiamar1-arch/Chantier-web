@@ -1,6 +1,6 @@
 // Chantier : réseau d'abord, cache en secours (l'app s'ouvre même hors ligne).
 // Les appels à l'API GitHub ne passent jamais par le cache.
-const CACHE = "chantier-v1";
+const CACHE = "chantier-v2";
 const SHELL = ["./", "index.html", "manifest.webmanifest", "icons/apple-touch-icon.png", "icons/icon-192.png", "icons/icon-512.png"];
 
 self.addEventListener("install", (e) => {
