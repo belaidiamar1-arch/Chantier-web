@@ -692,15 +692,16 @@ function viewSetup() {
     <p>Chantier enregistre tout dans <code>data.json</code> de ton dépôt privé GitHub. Il lui faut un jeton d'accès, créé une seule fois par appareil.</p>
     <ol>
       <li>Ouvre <a href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noopener">github.com → Fine-grained token</a>.</li>
-      <li>Nom : <code>Chantier</code>. Expiration : la plus longue possible.</li>
+      <li>Nom : <code>Chantier</code>. Expiration : « No expiration » si proposé, sinon la plus longue possible.</li>
       <li>Repository access : <b>Only select repositories</b> → <code>${esc(cfg.repo)}</code>.</li>
       <li>Permissions → Repository permissions → <b>Contents : Read and write</b>.</li>
       <li>Génère le jeton, copie-le et colle-le ci-dessous.</li>
     </ol>
-    ${failed ? `<p class="err">${esc(sync.error)}. Vérifie le jeton et le nom du dépôt.</p>` : ""}
+    ${failed ? `<p class="err">GitHub ne reconnaît pas ce jeton : il a pu être mal collé, ou il a expiré. Crée-en un nouveau (étapes ci-dessus) et colle-le en entier.</p>` : ""}
+    ${ui.tokenWarn ? `<p class="err">${esc(ui.tokenWarn)}</p>` : ""}
     ${field("s-owner", "Compte GitHub", `<input id="s-owner" name="owner" required value="${esc(cfg.owner)}" autocapitalize="off" autocorrect="off">`)}
     ${field("s-repo", "Dépôt de données", `<input id="s-repo" name="repo" required value="${esc(cfg.repo)}" autocapitalize="off" autocorrect="off">`)}
-    ${field("s-token", "Jeton d'accès", `<input id="s-token" name="token" type="password" required value="${esc(cfg.token)}" placeholder="github_pat_…" autocomplete="off">`)}
+    ${field("s-token", "Jeton d'accès", `<input id="s-token" name="token" type="text" required value="" placeholder="github_pat_…" autocomplete="one-time-code" autocapitalize="off" autocorrect="off" spellcheck="false" inputmode="text">`)}
     <button class="btn primary" type="submit">Connecter</button>
   </form>`;
 }
@@ -896,7 +897,13 @@ document.addEventListener("submit", async (e) => {
     setTimeout(() => $("#add-" + (f.dataset.ms || "none-" + ui.projectId))?.focus(), 30);
   }
   if (f.dataset.act === "setup") {
-    cfg.owner = f.owner.value.trim(); cfg.repo = f.repo.value.trim(); cfg.token = f.token.value.trim();
+    const tok = f.token.value.replace(/[\s\u200B-\u200D\uFEFF]/g, "");
+    if (!/^(github_pat_|ghp_)[A-Za-z0-9_]{20,}$/.test(tok)) {
+      ui.tokenWarn = "Ce texte ne ressemble pas à un jeton GitHub : il doit commencer par « github_pat_ » et faire environ 90 caractères. Colle-le à nouveau, en entier.";
+      render(); return;
+    }
+    ui.tokenWarn = "";
+    cfg.owner = f.owner.value.trim(); cfg.repo = f.repo.value.trim(); cfg.token = tok;
     saveCfg(); remote = null; sync.auth = false; setSync("idle");
     const b = f.querySelector("button[type=submit]"); b.disabled = true; b.textContent = "Connexion…";
     await pull(true); render();
